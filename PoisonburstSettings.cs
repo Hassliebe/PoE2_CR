@@ -114,6 +114,7 @@ public class DebugSettings
     public RangeNode<int> OverlayY { get; set; } = new(20, 0, 4000);
     public ColorNode OverlayColor { get; set; } = Color.LawnGreen;
     public ToggleNode ShowCounts { get; set; } = new(true);
+    public ToggleNode ShowTargetDetails { get; set; } = new(true);
 
     public ToggleNode EnableWindow { get; set; } = new(true);
     public HotkeyNodeV2 ToggleWindowKey { get; set; } = new(Keys.F8);

@@ -25,6 +25,12 @@ public class PoisonburstPathfinder : BaseSettingsPlugin<PoisonburstSettings>
     private readonly List<(string SkillId, string Name)> _cachedSkillBar = new();
     private readonly SimpleRaycaster _raycaster = new();
     private readonly Dictionary<SkillRule, Stopwatch> _ruleCooldowns = new();
+    private Entity _currentAimTarget;
+    private int _growthCount;
+    private readonly HashSet<uint> _growthCountIds = new();
+    private bool _cursorInGas;
+    private Entity _vineArrow;
+    private Entity _gasArrow;
     private string _logFilePath;
 
     private int _lastMonsterCount;
@@ -110,6 +116,7 @@ public class PoisonburstPathfinder : BaseSettingsPlugin<PoisonburstSettings>
         var monsters = GetHostileMonsters(scanRange);
         _lastMonsterCount = monsters.Count;
         _lastNearestDistance = monsters.Count > 0 ? monsters.Min(m => m.DistancePlayer) : 0f;
+        _currentAimTarget = monsters.FirstOrDefault();
 
         var lifePercent = TryGetEffectiveLifePercent(player);
         var manaPercent = TryGetManaPercent(player);
@@ -119,6 +126,7 @@ public class PoisonburstPathfinder : BaseSettingsPlugin<PoisonburstSettings>
         TryUseSkillRules(monsters, lifePercent);
 
         UpdateSkillBarCache();
+        UpdateGroundEffectInfo();
     }
 
     public override void Render()
@@ -141,6 +149,23 @@ public class PoisonburstPathfinder : BaseSettingsPlugin<PoisonburstSettings>
 
             var position = new Vector2(Settings.Debug.OverlayX, Settings.Debug.OverlayY);
             Graphics.DrawText(text, position, Settings.Debug.OverlayColor);
+
+            if (Settings.Debug.ShowTargetDetails)
+            {
+                var yOffset = position.Y + 18;
+                var rarityText = _currentAimTarget?.TryGetComponent<ObjectMagicProperties>(out var props) == true
+                    ? props.Rarity.ToString()
+                    : "None";
+                Graphics.DrawText($"Target rarity: {rarityText}", new Vector2(position.X, yOffset), Settings.Debug.OverlayColor);
+                yOffset += 16;
+                Graphics.DrawText($"Vine Arrow: {(_vineArrow?.Path ?? "none")}", new Vector2(position.X, yOffset), Settings.Debug.OverlayColor);
+                yOffset += 16;
+                Graphics.DrawText($"Gas Arrow: {(_gasArrow?.Path ?? "none")}", new Vector2(position.X, yOffset), Settings.Debug.OverlayColor);
+                yOffset += 16;
+                Graphics.DrawText($"Cursor in gas: {_cursorInGas}", new Vector2(position.X, yOffset), Settings.Debug.OverlayColor);
+                yOffset += 16;
+                Graphics.DrawText($"Toxic growths: {_growthCount}", new Vector2(position.X, yOffset), Settings.Debug.OverlayColor);
+            }
         }
 
         if (Settings.Debug.EnableWindow && _debugWindowVisible)
@@ -258,6 +283,8 @@ public class PoisonburstPathfinder : BaseSettingsPlugin<PoisonburstSettings>
             .OrderBy(m => m.DistancePlayer)
             .FirstOrDefault();
         if (target == null) return;
+
+        _currentAimTarget = target;
 
         var screenPos = GameController.IngameState.Camera.WorldToScreen(target.Pos);
         if (screenPos == Vector2.Zero) return;
@@ -453,6 +480,96 @@ public class PoisonburstPathfinder : BaseSettingsPlugin<PoisonburstSettings>
         return false;
     }
 
+    private void UpdateGroundEffectInfo()
+    {
+        _vineArrow = null;
+        _gasArrow = null;
+        _growthCount = 0;
+        _growthCountIds.Clear();
+        _cursorInGas = false;
+
+        var effectEntities = GameController?.EntityListWrapper?.ValidEntitiesByType?
+            .TryGetValue(EntityType.Effect, out var list) == true
+            ? list
+            : Enumerable.Empty<Entity>();
+
+        foreach (var entity in effectEntities)
+        {
+            var path = entity?.Path;
+            if (string.IsNullOrEmpty(path)) continue;
+
+            if (_vineArrow == null && PathMatches(path, "Metadata/Effects/Spells/bow_poison_bloom/PoisonBloom.ao"))
+            {
+                _vineArrow = entity;
+            }
+            else if (_gasArrow == null && PathMatches(path, "Metadata/Effects/Spells/crossbow_toxic_grenade/toxic_cloud.ao"))
+            {
+                _gasArrow = entity;
+            }
+
+            if (PathMatches(path, "Metadata/Effects/Spells/bow_toxic_pustule/pustule_01.ao"))
+            {
+                _growthCount++;
+            }
+        }
+
+        // Fallback: scan animated base paths (as EffectZones does) across multiple lists
+        if (_vineArrow == null || _gasArrow == null || _growthCount == 0)
+        {
+            var entityLists = new[]
+            {
+                GameController?.EntityListWrapper?.ValidEntitiesByType.TryGetValue(EntityType.Effect, out var e1) == true ? e1 : Enumerable.Empty<Entity>(),
+                GameController?.EntityListWrapper?.ValidEntitiesByType.TryGetValue(EntityType.MonsterMods, out var e2) == true ? e2 : Enumerable.Empty<Entity>(),
+                GameController?.EntityListWrapper?.ValidEntitiesByType.TryGetValue(EntityType.Terrain, out var e3) == true ? e3 : Enumerable.Empty<Entity>(),
+                GameController?.EntityListWrapper?.ValidEntitiesByType.TryGetValue(EntityType.None, out var e4) == true ? e4 : Enumerable.Empty<Entity>(),
+                GameController?.EntityListWrapper?.ValidEntitiesByType.TryGetValue(EntityType.Monster, out var e5) == true ? e5 : Enumerable.Empty<Entity>(),
+                GameController?.EntityListWrapper?.ValidEntitiesByType.TryGetValue(EntityType.MiscellaneousObjects, out var e6) == true ? e6 : Enumerable.Empty<Entity>(),
+                GameController?.EntityListWrapper?.ValidEntitiesByType.TryGetValue(EntityType.IngameIcon, out var e7) == true ? e7 : Enumerable.Empty<Entity>()
+            };
+
+            foreach (var entity in entityLists.SelectMany(x => x))
+            {
+                if (entity == null) continue;
+
+                string? basePath = null;
+                if (entity.TryGetComponent<Animated>(out var animated) && animated.BaseAnimatedObjectEntity != null)
+                    basePath = animated.BaseAnimatedObjectEntity.Path;
+                basePath ??= entity.Path;
+
+                if (string.IsNullOrEmpty(basePath)) continue;
+
+                if (_vineArrow == null && (PathMatches(basePath, "Metadata/Effects/Spells/bow_poison_bloom/PoisonBloom.ao") ||
+                                           PathMatches(basePath, "poison_bloom") ||
+                                           PathMatches(basePath, "Metadata/MiscellaneousObjects/PoisonbloomArrow") ||
+                                           PathMatches(basePath, "VineArrowBloom")))
+                    _vineArrow = entity;
+                if (_gasArrow == null && (PathMatches(basePath, "Metadata/Effects/Spells/crossbow_toxic_grenade/toxic_cloud.ao") ||
+                                          PathMatches(basePath, "Metadata/MiscellaneousObjects/PoisonbloomArrow/ToxicCloud") ||
+                                          PathMatches(basePath, "toxic_grenade") ||
+                                          PathMatches(basePath, "toxic_cloud")))
+                    _gasArrow = entity;
+                if (PathMatches(basePath, "Metadata/MiscellaneousObjects/PoisonbloomArrow/Poisonbloom") ||
+                    PathMatches(basePath, "Metadata/Effects/Spells/bow_toxic_pustule/pustule_01.ao") ||
+                    PathMatches(basePath, "toxic_pustule") ||
+                    PathMatches(basePath, "pustule_01"))
+                    _growthCountIds.Add(entity.Id);
+
+                if (_vineArrow != null && _gasArrow != null && _growthCountIds.Count > 0)
+                    break;
+            }
+        }
+
+        _growthCount = _growthCountIds.Count;
+
+        // Cursor-in-gas check: simple screen-distance check to the gas arrow
+        if (_gasArrow != null && GameController?.IngameState?.Camera is { } cam)
+        {
+            var screenPos = cam.WorldToScreen(_gasArrow.Pos) + _windowTopLeft;
+            var cursor = Input.ForceMousePosition;
+            _cursorInGas = Vector2.Distance(cursor, screenPos) <= 120; // configurable later if needed
+        }
+    }
+
     private bool RuleReady(SkillRule rule, int minCooldownMs)
     {
         if (!_ruleCooldowns.TryGetValue(rule, out var sw))
@@ -612,6 +729,11 @@ public class PoisonburstPathfinder : BaseSettingsPlugin<PoisonburstSettings>
             MonsterRarityFilter.UniqueOnly => props.Rarity == MonsterRarity.Unique,
             _ => true
         };
+    }
+
+    private static bool PathMatches(string path, string fragment)
+    {
+        return path?.IndexOf(fragment, StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private static bool IsBoss(Entity entity)
